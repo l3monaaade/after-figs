@@ -1,4 +1,4 @@
-//! Unified MotionCraft Studio UI combining FigCraft (SVG/vector authoring, layout grids,
+//! Unified After Figs Studio UI combining FigCraft (SVG/vector authoring, layout grids,
 //! auto-layout frames, constraints, boolean groups, inside/outside/variable-width strokes)
 //! and EffectCraft (timeline, keyframes, expressions, shape modifiers, layer styles, effects).
 
@@ -12,20 +12,381 @@
     clippy::unreachable
 )]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
+use effectcraft_engine::{ExportJob, ExportResult, Exporter};
 use effectcraft_project::ItemId;
+use effectcraft_project::render_queue::OutputFormat;
 use effectcraft_ui_egui::EffectcraftApp;
 use figcraft_doc::{Document, NodeId};
-use figcraft_ui_egui::{FigApp, NoServices};
+use figcraft_ui_egui::FigApp;
 use motion_bridge::{
     BakeOptions, BooleanBakeMode, LayerGranularity, MotionStudioFile, TextBakeMode,
     bake_frame_to_comp, create_showcase_studio, export_frame_to_svg, find_linked_comp,
     import_svg_into_document, sync_document_to_project,
 };
+use serde_json::json;
 
-/// Active workspace mode in the unified MotionCraft Studio window.
+/// In-memory virtual file table used by browser exports, saves, and imports.
+static VIRTUAL_FS: LazyLock<Mutex<BTreeMap<String, Vec<u8>>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+/// Queue of status messages posted from async browser tasks (folder permission, system font loading, file pickers).
+static PENDING_STATUS: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+
+/// Queue of `(filename, bytes)` loaded asynchronously by browser file pickers or drag-and-drop.
+static PENDING_FILES: LazyLock<Mutex<Vec<(String, Vec<u8>)>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Name of the user-authorized export directory (when connected via File System Access API or desktop folder picker).
+static CONNECTED_EXPORT_FOLDER: LazyLock<Mutex<Option<String>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static EXPORT_DIR_HANDLE: std::cell::RefCell<Option<wasm_bindgen::JsValue>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn set_pending_status(msg: impl Into<String>) {
+    let mut lock = PENDING_STATUS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *lock = Some(msg.into());
+}
+
+fn take_pending_status() -> Option<String> {
+    PENDING_STATUS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
+fn connected_export_folder_name() -> Option<String> {
+    CONNECTED_EXPORT_FOLDER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+fn set_connected_export_folder_name(name: Option<String>) {
+    let mut lock = CONNECTED_EXPORT_FOLDER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *lock = name;
+}
+
+/// Register raw `.ttf` / `.otf` / `.ttc` font bytes into both FigCraft and EffectCraft text engines.
+pub fn register_font_bytes(bytes: Vec<u8>) -> usize {
+    let fig_added = figcraft_text::db()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .add_bytes(bytes.clone())
+        .len();
+    figcraft_text::clear_layout_cache();
+    let ec_added = effectcraft_text::fonts::add_font_data(bytes).len();
+    fig_added.max(ec_added)
+}
+
+/// Return the sorted list of available font families registered in the text engine.
+pub fn available_font_families() -> Vec<String> {
+    figcraft_text::db()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .families()
+}
+
+fn clean_file_name(path_or_name: &str) -> &str {
+    path_or_name
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("after-figs-export.bin")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn virtual_save_path(name: &str) -> String {
+    let base = clean_file_name(if name.trim().is_empty() {
+        "after-figs-output"
+    } else {
+        name
+    });
+    format!("/{base}")
+}
+
+/// Store a file in `VIRTUAL_FS` and deliver it to the user (via the connected export folder or browser download on `wasm32`,
+/// or native filesystem on desktop).
+pub fn deliver_exported_file(path_or_name: &str, bytes: Vec<u8>) -> bool {
+    let fname = clean_file_name(path_or_name).to_string();
+    let vpath = format!("/{fname}");
+    {
+        let mut fs = VIRTUAL_FS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        fs.insert(path_or_name.to_string(), bytes.clone());
+        fs.insert(vpath, bytes.clone());
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let has_dir = EXPORT_DIR_HANDLE.with(|cell| cell.borrow().is_some());
+        if has_dir {
+            write_to_connected_dir_or_download(fname, bytes);
+            true
+        } else {
+            browser_download(&fname, &bytes)
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let target = std::path::Path::new(path_or_name);
+        if target.is_absolute()
+            && target.parent().is_some_and(|p| p != std::path::Path::new("/"))
+        {
+            if let Some(parent) = target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if std::fs::write(target, &bytes).is_ok() {
+                return true;
+            }
+        }
+        if let Some(folder) = connected_export_folder_name() {
+            let out_path = PathBuf::from(folder).join(&fname);
+            if std::fs::write(&out_path, &bytes).is_ok() {
+                return true;
+            }
+        }
+        true
+    }
+}
+
+/// Platform services for FigCraft (`FigApp`), enabling Inspector exports (PNG, SVG, PDF, JPG, WebP)
+/// to download in the browser or save via file dialog on desktop.
+pub struct StudioFigServices;
+
+impl figcraft_ui_egui::Services for StudioFigServices {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pick_open(&mut self, title: &str, exts: &[&str]) -> figcraft_ui_egui::DialogFuture {
+        let path = rfd::FileDialog::new()
+            .set_title(title)
+            .add_filter(title, exts)
+            .pick_file();
+        Box::pin(std::future::ready(path))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pick_save(
+        &mut self,
+        title: &str,
+        name: &str,
+        exts: &[&str],
+    ) -> figcraft_ui_egui::DialogFuture {
+        let path = rfd::FileDialog::new()
+            .set_title(title)
+            .set_file_name(name)
+            .add_filter(title, exts)
+            .save_file();
+        Box::pin(std::future::ready(path))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pick_folder(&mut self, title: &str) -> figcraft_ui_egui::DialogFuture {
+        let path = rfd::FileDialog::new().set_title(title).pick_folder();
+        Box::pin(std::future::ready(path))
+    }
+
+    fn downloads(&self) -> bool {
+        cfg!(target_arch = "wasm32") || connected_export_folder_name().is_some()
+    }
+
+    fn download(&mut self, name: &str, bytes: &[u8]) -> bool {
+        let ok = deliver_exported_file(name, bytes.to_vec());
+        if ok {
+            set_pending_status(format!("Exported {name} ({} KB)", bytes.len() / 1024));
+        }
+        ok
+    }
+}
+
+/// Host services for EffectCraft (`EffectcraftApp`), routing file writes (`Save Frame As`,
+/// `Export Lottie`, `Export SVG`, `Save Project`) to browser downloads / connected folder on `wasm32`
+/// and native disk on desktop.
+pub struct StudioEcServices;
+
+impl effectcraft_engine::Services for StudioEcServices {
+    fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        if let Some(bytes) = VIRTUAL_FS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(path)
+            .cloned()
+        {
+            return Ok(bytes);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::fs::read(path)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{path} not found in browser virtual storage"),
+            ))
+        }
+    }
+
+    fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let p = std::path::Path::new(path);
+            if p.parent().is_some_and(|parent| parent != std::path::Path::new("/")) {
+                if let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::write(p, data).is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+        if deliver_exported_file(path, data.to_vec()) {
+            let fname = clean_file_name(path);
+            set_pending_status(format!("Exported {fname} ({} KB)", data.len() / 1024));
+            Ok(())
+        } else {
+            Err(std::io::Error::other("Failed to deliver exported file"))
+        }
+    }
+
+    fn store_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        VIRTUAL_FS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(path.to_string(), data.to_vec());
+        Ok(())
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        if VIRTUAL_FS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(path)
+        {
+            return true;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::path::Path::new(path).exists()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
+}
+
+/// Cross-platform EffectCraft Render Queue exporter:
+/// - On `wasm32` (and in-memory paths), writes to an in-memory buffer via `sink` and immediately
+///   delivers the finished video / animation / image sequence to the user's connected Export Folder
+///   or browser downloads, while using the CPU compositor on `wasm32` main thread so synchronous
+///   GPU readbacks never fail.
+/// - On desktop, writes directly to the filesystem path (or to the in-memory sink if targeting a virtual `/file` path).
+pub struct StudioExporter {
+    sink: Arc<effectcraft_export::Sink>,
+}
+
+impl Default for StudioExporter {
+    fn default() -> Self {
+        Self {
+            sink: Arc::new(|path: &str, data: Vec<u8>| {
+                let fname = clean_file_name(path).to_string();
+                let kb = data.len() / 1024;
+                deliver_exported_file(path, data);
+                set_pending_status(format!("Rendered & exported {fname} ({kb} KB)"));
+            }),
+        }
+    }
+}
+
+impl Exporter for StudioExporter {
+    fn formats(&self) -> Vec<OutputFormat> {
+        effectcraft_export::available_formats()
+    }
+
+    fn export(
+        &self,
+        job: &ExportJob,
+        progress: &mut dyn FnMut(u64, u64) -> bool,
+    ) -> Result<ExportResult, String> {
+        effectcraft_engine::render::passes::block_on(self.export_async(job, progress))
+    }
+
+    fn export_async<'a>(
+        &'a self,
+        job: &'a ExportJob<'a>,
+        progress: &'a mut dyn FnMut(u64, u64) -> bool,
+    ) -> effectcraft_engine::render_queue::LocalFuture<'a, Result<ExportResult, String>> {
+        Box::pin(async move {
+            // On wasm32 (or when outputting to a virtual root path like `/Comp.mp4`), always use
+            // the in-memory sink so std::fs::File::create is never called in the browser.
+            let use_memory_sink = cfg!(target_arch = "wasm32")
+                || std::path::Path::new(job.path).parent() == Some(std::path::Path::new("/"));
+
+            // On wasm32 main thread, synchronous GPU readback is unavailable without a worker
+            // deferred device; passing None renders cleanly on the CPU compositor.
+            let accel = if cfg!(target_arch = "wasm32") {
+                None
+            } else {
+                job.accel
+            };
+
+            let j = effectcraft_export::Job {
+                project: job.project,
+                footage: job.footage,
+                expr: job.expr,
+                accel,
+                comp: job.item.comp,
+                settings: &job.item.settings,
+                output: &job.item.output,
+                path: job.path,
+                sink: if use_memory_sink {
+                    Some(self.sink.as_ref())
+                } else {
+                    None
+                },
+                options: effectcraft_export::JobOptions {
+                    log: job.item.log,
+                    label: job.label.clone(),
+                    storage: job.storage,
+                    overflow: job.project.render_prefs.overflow_folders.clone(),
+                },
+                nested_switches: job.nested_switches,
+            };
+            match effectcraft_export::export_async(&j, &mut |p| progress(p.done, p.total)).await {
+                Ok(r) => Ok(ExportResult {
+                    path: r.path,
+                    frames: r.frames,
+                    width: r.width,
+                    height: r.height,
+                    bytes: r.bytes,
+                    seconds: r.seconds,
+                    audio: r.audio,
+                    log: r.log,
+                    overflow: r.overflow,
+                }),
+                Err(effectcraft_export::ExportError::Cancelled) => {
+                    Err(effectcraft_engine::render_queue::CANCELLED.into())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        })
+    }
+}
+
+/// Active workspace mode in the unified After Figs window.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WorkspaceMode {
     /// Full-window FigCraft vector & layout design canvas with grids, frames, and constraints.
@@ -90,14 +451,17 @@ impl MotionStudioApp {
         fig_session.set_ui_dark(true);
 
         let mut ec_session = effectcraft_host::session();
+        ec_session.services = Arc::new(StudioEcServices);
+        ec_session.exporter = Some(Arc::new(StudioExporter::default()));
         ec_session.end_recovery();
 
-        let mut fig_app = FigApp::new(fig_session, Box::new(NoServices));
+        let mut fig_app = FigApp::new(fig_session, Box::new(StudioFigServices));
         fig_app.ui.home = false;
 
         let mut ec_app = EffectcraftApp::new(ec_session);
         ec_app.ui.start_screen = false;
         ec_app.recovery = None;
+        install_ec_hooks(&mut ec_app);
 
         let mut app = Self {
             mode: WorkspaceMode::Design,
@@ -325,6 +689,157 @@ impl MotionStudioApp {
         export_frame_to_svg(doc, target_frame).map_err(|e| e.to_string())
     }
 
+    /// Render the active EffectCraft composition in the Render Queue with the specified format
+    /// (`"H264"`, `"Gif"`, `"WebM"`, `"ProRes"`) and immediately deliver the output file.
+    pub fn quick_render_active_comp(&mut self, format_name: &str, ext: &str) -> Result<String, String> {
+        if self.auto_sync {
+            let _ = self.sync_all_frames();
+        }
+        let cid = self
+            .ec_app
+            .session
+            .active_comp_id()
+            .or_else(|| first_comp_id(&self.ec_app.session.project))
+            .ok_or_else(|| "No active composition to render".to_string())?;
+        self.ec_app.session.state.active_comp = Some(cid);
+
+        let comp_name = self
+            .ec_app
+            .session
+            .project
+            .item(cid)
+            .map(|i| i.name.clone())
+            .unwrap_or_else(|| "Composition".to_string());
+        let safe_stem: String = comp_name
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        let file_name = format!("{safe_stem}.{ext}");
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let out_path = if let Some(folder) = connected_export_folder_name() {
+            PathBuf::from(folder)
+                .join(&file_name)
+                .to_string_lossy()
+                .to_string()
+        } else if let Some(picked) = rfd::FileDialog::new()
+            .set_file_name(&file_name)
+            .add_filter(format_name, &[ext])
+            .save_file()
+        {
+            picked.to_string_lossy().to_string()
+        } else {
+            return Err("Render cancelled".to_string());
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        let out_path = format!("/{file_name}");
+
+        let added = self
+            .ec_app
+            .session
+            .execute("renderQueue.add", json!({ "comp": cid.0 }))
+            .map_err(|e| e.to_string())?;
+        let item_id = added["id"]
+            .as_u64()
+            .or_else(|| self.ec_app.session.project.render_queue.last().map(|i| i.id))
+            .ok_or_else(|| "Failed to add composition to Render Queue".to_string())?;
+
+        self.ec_app
+            .session
+            .execute(
+                "renderQueue.setOutputModule",
+                json!({
+                    "item": item_id,
+                    "format": format_name,
+                    "output": out_path,
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+
+        self.ec_app
+            .session
+            .execute("renderQueue.render", json!({ "wait": true }))
+            .map_err(|e| e.to_string())?;
+
+        if let Some(rq_item) = self
+            .ec_app
+            .session
+            .project
+            .render_queue
+            .iter()
+            .find(|i| i.id == item_id)
+        {
+            if let effectcraft_project::render_queue::RenderStatus::Failed(reason) =
+                &rq_item.status
+            {
+                return Err(format!("Render failed: {reason}"));
+            }
+        }
+
+        let status = format!("Rendered & exported {file_name} ({format_name})");
+        self.status_banner = status.clone();
+        Ok(status)
+    }
+
+    /// Save the current frame of the active EffectCraft composition as a `.png`.
+    pub fn quick_save_current_frame_png(&mut self) -> Result<String, String> {
+        if self.auto_sync {
+            let _ = self.sync_all_frames();
+        }
+        let cid = self
+            .ec_app
+            .session
+            .active_comp_id()
+            .or_else(|| first_comp_id(&self.ec_app.session.project))
+            .ok_or_else(|| "No active composition".to_string())?;
+        self.ec_app.session.state.active_comp = Some(cid);
+
+        let comp_name = self
+            .ec_app
+            .session
+            .project
+            .item(cid)
+            .map(|i| i.name.clone())
+            .unwrap_or_else(|| "Frame".to_string());
+        let safe_stem: String = comp_name
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        let file_name = format!("{safe_stem}_frame.png");
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let out_path = if let Some(folder) = connected_export_folder_name() {
+            PathBuf::from(folder)
+                .join(&file_name)
+                .to_string_lossy()
+                .to_string()
+        } else if let Some(picked) = rfd::FileDialog::new()
+            .set_file_name(&file_name)
+            .add_filter("PNG Image", &["png"])
+            .save_file()
+        {
+            picked.to_string_lossy().to_string()
+        } else {
+            return Err("Export cancelled".to_string());
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        let out_path = format!("/{file_name}");
+
+        self.ec_app
+            .session
+            .execute(
+                "comp.saveFrameAs",
+                json!({ "comp": cid.0, "path": out_path }),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let msg = format!("Exported frame {file_name}");
+        self.status_banner = msg.clone();
+        Ok(msg)
+    }
+
     fn check_auto_sync(&mut self, pointer_down: bool) {
         if !self.auto_sync || pointer_down {
             return;
@@ -337,45 +852,83 @@ impl MotionStudioApp {
         }
     }
 
-    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        for file in dropped {
-            let path = file.path().to_path_buf();
-            let name = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("dropped")
-                .to_string();
-            #[cfg(not(target_arch = "wasm32"))]
-            let bytes: Option<Vec<u8>> = file
-                .bytes()
-                .ok()
-                .or_else(|| std::fs::read(&path).ok());
-            #[cfg(target_arch = "wasm32")]
-            let bytes: Option<Vec<u8>> = None;
-
-            let Some(bytes) = bytes else {
-                continue;
-            };
-            let lower = name.to_ascii_lowercase();
-            if lower.ends_with(".svg") {
-                if let Ok(svg) = String::from_utf8(bytes) {
-                    let stem = name.trim_end_matches(".svg").trim_end_matches(".SVG");
-                    if let Err(e) = self.import_svg_str(&svg, Some(stem)) {
-                        self.status_banner = format!("SVG import error: {e}");
+    fn process_incoming_file_bytes(&mut self, name: &str, bytes: Vec<u8>) {
+        let lower = name.to_ascii_lowercase();
+        if lower.ends_with(".ttf") || lower.ends_with(".otf") || lower.ends_with(".ttc") {
+            let count = register_font_bytes(bytes);
+            self.status_banner = format!(
+                "Loaded font '{name}' ({count} face(s) added — {} total font families)",
+                available_font_families().len()
+            );
+        } else if lower.ends_with(".svg") {
+            if let Ok(svg) = String::from_utf8(bytes) {
+                let stem = name.trim_end_matches(".svg").trim_end_matches(".SVG");
+                if let Err(e) = self.import_svg_str(&svg, Some(stem)) {
+                    self.status_banner = format!("SVG import error: {e}");
+                }
+            }
+        } else if lower.ends_with(".motion") || lower.ends_with(".json") {
+            if let Ok(text) = String::from_utf8(bytes) {
+                match MotionStudioFile::from_json(&text) {
+                    Ok(studio) => {
+                        self.load_studio(studio);
+                        self.status_banner = format!("Loaded {name}");
+                    }
+                    Err(e) => {
+                        self.status_banner = format!("Failed to load {name}: {e}");
                     }
                 }
-            } else if lower.ends_with(".motion") || lower.ends_with(".json") {
-                if let Ok(text) = String::from_utf8(bytes) {
-                    match MotionStudioFile::from_json(&text) {
-                        Ok(studio) => {
-                            self.load_studio(studio);
-                            self.status_banner = format!("Loaded {name}");
+            }
+        }
+    }
+
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let pending = {
+            let mut q = PENDING_FILES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *q)
+        };
+        for (name, bytes) in pending {
+            self.process_incoming_file_bytes(&name, bytes);
+        }
+
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        for file in dropped {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let path = file.path().to_path_buf();
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("dropped")
+                    .to_string();
+                let bytes: Option<Vec<u8>> = file
+                    .bytes()
+                    .ok()
+                    .or_else(|| std::fs::read(&path).ok());
+                if let Some(bytes) = bytes {
+                    self.process_incoming_file_bytes(&name, bytes);
+                }
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                if let Some(web_file) = file.web_file().cloned() {
+                    let ctx_clone = ctx.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let fname = web_file.name();
+                        if let Ok(buf) =
+                            wasm_bindgen_futures::JsFuture::from(web_file.array_buffer()).await
+                        {
+                            let bytes = js_sys::Uint8Array::new(&buf).to_vec();
+                            PENDING_FILES
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .push((fname, bytes));
+                            ctx_clone.request_repaint();
                         }
-                        Err(e) => {
-                            self.status_banner = format!("Failed to load {name}: {e}");
-                        }
-                    }
+                    });
                 }
             }
         }
@@ -390,7 +943,7 @@ impl MotionStudioApp {
     }
 
     /// Compact bottom toolbar (`egui::Panel::bottom`) for switching between Design (FigCraft)
-    /// and Animate (EffectCraft), selecting frames, baking/auto-syncing, and file/SVG operations.
+    /// and Animate (EffectCraft), selecting frames, baking/auto-syncing, exporting/rendering, and loading fonts.
     fn draw_studio_bottom_bar(&mut self, ui: &mut egui::Ui) {
         let bg = egui::Color32::from_rgb(0x14, 0x16, 0x1B);
         let border = egui::Color32::from_rgb(0x2B, 0x2F, 0x38);
@@ -482,7 +1035,7 @@ impl MotionStudioApp {
 
                     egui::ComboBox::from_id_salt("motion_frame_selector")
                         .selected_text(egui::RichText::new(combo_label).size(11.0))
-                        .width(195.0)
+                        .width(185.0)
                         .show_ui(ui, |ui| {
                             for f in &frames {
                                 let mut desc = format!("{} ({}×{})", f.name, f.width, f.height);
@@ -537,6 +1090,16 @@ impl MotionStudioApp {
                     .on_hover_text(
                         "Automatically sync FigCraft vector/grid changes into EffectCraft when editing",
                     );
+
+                    ui.menu_button(egui::RichText::new("📤 Export / Render").size(11.0), |ui| {
+                        ui.set_min_width(250.0);
+                        self.draw_export_menu_items(ui);
+                    });
+
+                    ui.menu_button(egui::RichText::new("🔤 Fonts").size(11.0), |ui| {
+                        ui.set_min_width(250.0);
+                        self.draw_fonts_menu_items(ui);
+                    });
 
                     ui.menu_button(egui::RichText::new("⚙ Bridge").size(11.0), |ui| {
                         ui.set_min_width(245.0);
@@ -601,8 +1164,8 @@ impl MotionStudioApp {
                         );
                     });
 
-                    ui.menu_button(egui::RichText::new("📁 File / SVG").size(11.0), |ui| {
-                        ui.set_min_width(210.0);
+                    ui.menu_button(egui::RichText::new("📁 File").size(11.0), |ui| {
+                        ui.set_min_width(220.0);
                         self.draw_file_menu_items(ui);
                     });
 
@@ -617,13 +1180,147 @@ impl MotionStudioApp {
             });
     }
 
+    fn draw_export_menu_items(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Export & Render Output").strong());
+        if let Some(folder) = connected_export_folder_name() {
+            ui.label(
+                egui::RichText::new(format!("📂 Connected Folder: {folder}"))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(0x4A, 0xDE, 0x80)),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new("💡 Exports download automatically, or connect a folder below")
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(0x94, 0xA3, 0xB8)),
+            );
+        }
+
+        if ui
+            .button("📂 Connect Export Folder (Grant Permission)…")
+            .on_hover_text(
+                "Grant permission to save rendered videos & exports directly into a folder on your computer",
+            )
+            .clicked()
+        {
+            ui.close();
+            request_export_directory_permission(ui.ctx());
+        }
+
+        ui.separator();
+        ui.label(egui::RichText::new("Quick Render (EffectCraft Composition)").strong());
+
+        if ui.button("🎥 Render MP4 Video (H.264)").clicked() {
+            ui.close();
+            if let Err(e) = self.quick_render_active_comp("H264", "mp4") {
+                self.status_banner = e;
+            }
+        }
+        if ui.button("🎞 Render Animated GIF").clicked() {
+            ui.close();
+            if let Err(e) = self.quick_render_active_comp("Gif", "gif") {
+                self.status_banner = e;
+            }
+        }
+        if ui.button("🌐 Render WebM Video (VP9)").clicked() {
+            ui.close();
+            if let Err(e) = self.quick_render_active_comp("WebM", "webm") {
+                self.status_banner = e;
+            }
+        }
+        if ui.button("📸 Save Current Comp Frame as PNG").clicked() {
+            ui.close();
+            if let Err(e) = self.quick_save_current_frame_png() {
+                self.status_banner = e;
+            }
+        }
+
+        ui.separator();
+        ui.label(egui::RichText::new("Vector & Project Export").strong());
+
+        if ui.button("🖼 Export Active FigCraft Frame as SVG").clicked() {
+            ui.close();
+            match self.export_selected_frame_svg() {
+                Ok(svg) => {
+                    if deliver_exported_file("frame.svg", svg.into_bytes()) {
+                        self.status_banner = "Exported frame.svg".to_string();
+                    }
+                }
+                Err(e) => {
+                    self.status_banner = format!("SVG export error: {e}");
+                }
+            }
+        }
+
+        if ui.button("📋 Open EffectCraft Render Queue…").clicked() {
+            ui.close();
+            if self.auto_sync {
+                let _ = self.sync_all_frames();
+            }
+            self.mode = WorkspaceMode::Animate;
+            if let Some(cid) = self.ec_app.session.active_comp_id() {
+                if self.ec_app.session.project.render_queue.is_empty() {
+                    let _ = self
+                        .ec_app
+                        .session
+                        .execute("renderQueue.add", json!({ "comp": cid.0 }));
+                }
+            }
+            self.ec_app
+                .show_panel(effectcraft_ui_egui::dock::PanelKind::RenderQueue);
+        }
+    }
+
+    fn draw_fonts_menu_items(&mut self, ui: &mut egui::Ui) {
+        let families = available_font_families();
+        ui.label(
+            egui::RichText::new(format!("Typography — {} Font Families Loaded", families.len()))
+                .strong(),
+        );
+        ui.separator();
+
+        if ui
+            .button("🖥 Load System Fonts (Browser Permission)…")
+            .on_hover_text(
+                "Ask the browser for permission to load fonts installed on your computer into FigCraft & EffectCraft",
+            )
+            .clicked()
+        {
+            ui.close();
+            request_local_fonts_permission(ui.ctx());
+        }
+
+        if ui
+            .button("➕ Upload Font Files (.ttf / .otf / .ttc)…")
+            .on_hover_text("Pick .ttf, .otf, or .ttc font files from your computer to use immediately")
+            .clicked()
+        {
+            ui.close();
+            pick_and_load_font_files(ui.ctx());
+        }
+
+        ui.separator();
+        ui.label(
+            egui::RichText::new("Available Families (Bundled + Loaded):")
+                .size(11.0)
+                .color(egui::Color32::from_rgb(0x94, 0xA3, 0xB8)),
+        );
+        egui::ScrollArea::vertical()
+            .max_height(210.0)
+            .show(ui, |ui| {
+                for fam in &families {
+                    ui.label(egui::RichText::new(format!("• {fam}")).size(11.0));
+                }
+            });
+    }
+
     fn draw_file_menu_items(&mut self, ui: &mut egui::Ui) {
         #[cfg(not(target_arch = "wasm32"))]
         {
             if ui.button("📂 Open .motion Studio…").clicked() {
                 ui.close();
                 if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("MotionCraft Studio", &["motion", "json"])
+                    .add_filter("After Figs Studio", &["motion", "json"])
                     .pick_file()
                 {
                     match MotionStudioFile::load_from_path(&path) {
@@ -642,7 +1339,7 @@ impl MotionStudioApp {
                 ui.close();
                 if let Some(path) = rfd::FileDialog::new()
                     .set_file_name("project.motion")
-                    .add_filter("MotionCraft Studio", &["motion"])
+                    .add_filter("After Figs Studio", &["motion"])
                     .save_file()
                 {
                     if let Some(studio) = self.to_studio_file() {
@@ -681,42 +1378,21 @@ impl MotionStudioApp {
                     }
                 }
             }
-            if ui.button("📤 Export Active Frame as SVG…").clicked() {
-                ui.close();
-                match self.export_selected_frame_svg() {
-                    Ok(svg) => {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .set_file_name("frame.svg")
-                            .add_filter("SVG Vector", &["svg"])
-                            .save_file()
-                        {
-                            match std::fs::write(&path, svg) {
-                                Ok(()) => {
-                                    self.status_banner =
-                                        format!("Exported Frame SVG to {}", path.display());
-                                }
-                                Err(e) => {
-                                    self.status_banner = format!("Export failed: {e}");
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        self.status_banner = format!("SVG export error: {e}");
-                    }
-                }
-            }
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            if ui.button("💾 Download .motion Studio").clicked() {
+            if ui.button("📂 Open .motion or .svg File…").clicked() {
+                ui.close();
+                pick_and_load_studio_or_svg(ui.ctx());
+            }
+            if ui.button("💾 Save / Download .motion Studio").clicked() {
                 ui.close();
                 if let Some(studio) = self.to_studio_file() {
                     match studio.to_json_pretty() {
                         Ok(json) => {
-                            if browser_download("project.motion", json.as_bytes()) {
-                                self.status_banner = "Downloaded project.motion".to_string();
+                            if deliver_exported_file("project.motion", json.into_bytes()) {
+                                self.status_banner = "Saved project.motion".to_string();
                             } else {
                                 self.status_banner = "Browser download failed".to_string();
                             }
@@ -727,25 +1403,12 @@ impl MotionStudioApp {
                     }
                 }
             }
-            if ui.button("📤 Download Active Frame as SVG").clicked() {
-                ui.close();
-                match self.export_selected_frame_svg() {
-                    Ok(svg) => {
-                        if browser_download("frame.svg", svg.as_bytes()) {
-                            self.status_banner = "Downloaded frame.svg".to_string();
-                        } else {
-                            self.status_banner = "Browser download failed".to_string();
-                        }
-                    }
-                    Err(e) => {
-                        self.status_banner = format!("SVG export error: {e}");
-                    }
-                }
-            }
             ui.label(
-                egui::RichText::new("Tip: Drag & drop .svg or .motion files anywhere onto the window to import")
-                    .size(10.5)
-                    .color(egui::Color32::from_rgb(0x94, 0xA3, 0xB8)),
+                egui::RichText::new(
+                    "Tip: Drag & drop .svg, .motion, or .ttf/.otf font files anywhere onto the window",
+                )
+                .size(10.5)
+                .color(egui::Color32::from_rgb(0x94, 0xA3, 0xB8)),
             );
         }
 
@@ -760,9 +1423,451 @@ impl MotionStudioApp {
     }
 }
 
+fn install_ec_hooks(ec_app: &mut EffectcraftApp) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        ec_app.hooks.pick_save = Some(Box::new(|name: &str| {
+            Some(virtual_save_path(if name.is_empty() {
+                "Untitled Project.ecproj"
+            } else {
+                name
+            }))
+        }));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        ec_app.hooks.pick_save = Some(Box::new(|name: &str| {
+            let default_name = clean_file_name(if name.is_empty() {
+                "Untitled Project.ecproj"
+            } else {
+                name
+            });
+            if let Some(folder) = connected_export_folder_name() {
+                return Some(
+                    PathBuf::from(folder)
+                        .join(default_name)
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
+            rfd::FileDialog::new()
+                .set_file_name(default_name)
+                .save_file()
+                .map(|p| p.to_string_lossy().to_string())
+        }));
+    }
+}
+
+fn request_export_directory_permission(ctx: &egui::Context) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = ctx;
+        if let Some(folder) = rfd::FileDialog::new()
+            .set_title("Select Export Folder")
+            .pick_folder()
+        {
+            let display = folder.to_string_lossy().to_string();
+            set_connected_export_folder_name(Some(display.clone()));
+            set_pending_status(format!("Connected export folder: {display}"));
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast as _;
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let picker_val =
+            js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("showDirectoryPicker"))
+                .unwrap_or(wasm_bindgen::JsValue::UNDEFINED);
+        let Ok(picker_fn) = picker_val.dyn_into::<js_sys::Function>() else {
+            set_pending_status(
+                "This browser saves exports directly to your Downloads folder automatically",
+            );
+            ctx.request_repaint();
+            return;
+        };
+        let opts = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(
+            &opts,
+            &wasm_bindgen::JsValue::from_str("mode"),
+            &wasm_bindgen::JsValue::from_str("readwrite"),
+        );
+        let Ok(promise_val) = picker_fn.call1(&window, &opts) else {
+            return;
+        };
+        let Ok(promise) = promise_val.dyn_into::<js_sys::Promise>() else {
+            return;
+        };
+        let ctx_clone = ctx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            match wasm_bindgen_futures::JsFuture::from(promise).await {
+                Ok(dir_handle) => {
+                    let folder_name = js_sys::Reflect::get(
+                        &dir_handle,
+                        &wasm_bindgen::JsValue::from_str("name"),
+                    )
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_else(|| "Selected Folder".to_string());
+                    EXPORT_DIR_HANDLE.with(|cell| {
+                        *cell.borrow_mut() = Some(dir_handle);
+                    });
+                    set_connected_export_folder_name(Some(folder_name.clone()));
+                    set_pending_status(format!(
+                        "Granted permission to '{folder_name}' — exports & renders will write directly to this folder"
+                    ));
+                    ctx_clone.request_repaint();
+                }
+                Err(err) => {
+                    let msg = format!("{err:?}");
+                    if !msg.contains("AbortError") && !msg.contains("abort") {
+                        set_pending_status(
+                            "Folder permission declined — exports will download automatically via the browser",
+                        );
+                        ctx_clone.request_repaint();
+                    }
+                }
+            }
+        });
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn write_to_connected_dir_or_download(file_name: String, bytes: Vec<u8>) {
+    use wasm_bindgen::JsCast as _;
+    let handle_opt = EXPORT_DIR_HANDLE.with(|cell| cell.borrow().clone());
+    let Some(dir_handle) = handle_opt else {
+        let _ = browser_download(&file_name, &bytes);
+        return;
+    };
+
+    wasm_bindgen_futures::spawn_local(async move {
+        let ok = async {
+            let get_file_fn = js_sys::Reflect::get(
+                &dir_handle,
+                &wasm_bindgen::JsValue::from_str("getFileHandle"),
+            )
+            .ok()?
+            .dyn_into::<js_sys::Function>()
+            .ok()?;
+            let opts = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(
+                &opts,
+                &wasm_bindgen::JsValue::from_str("create"),
+                &wasm_bindgen::JsValue::from_bool(true),
+            );
+            let file_promise = get_file_fn
+                .call2(
+                    &dir_handle,
+                    &wasm_bindgen::JsValue::from_str(&file_name),
+                    &opts,
+                )
+                .ok()?
+                .dyn_into::<js_sys::Promise>()
+                .ok()?;
+            let file_handle = wasm_bindgen_futures::JsFuture::from(file_promise)
+                .await
+                .ok()?;
+
+            let create_writable_fn = js_sys::Reflect::get(
+                &file_handle,
+                &wasm_bindgen::JsValue::from_str("createWritable"),
+            )
+            .ok()?
+            .dyn_into::<js_sys::Function>()
+            .ok()?;
+            let writable_promise = create_writable_fn
+                .call0(&file_handle)
+                .ok()?
+                .dyn_into::<js_sys::Promise>()
+                .ok()?;
+            let writable = wasm_bindgen_futures::JsFuture::from(writable_promise)
+                .await
+                .ok()?;
+
+            let write_fn =
+                js_sys::Reflect::get(&writable, &wasm_bindgen::JsValue::from_str("write"))
+                    .ok()?
+                    .dyn_into::<js_sys::Function>()
+                    .ok()?;
+            let u8_array = js_sys::Uint8Array::from(bytes.as_slice());
+            let write_promise = write_fn
+                .call1(&writable, &u8_array)
+                .ok()?
+                .dyn_into::<js_sys::Promise>()
+                .ok()?;
+            wasm_bindgen_futures::JsFuture::from(write_promise)
+                .await
+                .ok()?;
+
+            let close_fn =
+                js_sys::Reflect::get(&writable, &wasm_bindgen::JsValue::from_str("close"))
+                    .ok()?
+                    .dyn_into::<js_sys::Function>()
+                    .ok()?;
+            let close_promise = close_fn
+                .call0(&writable)
+                .ok()?
+                .dyn_into::<js_sys::Promise>()
+                .ok()?;
+            wasm_bindgen_futures::JsFuture::from(close_promise)
+                .await
+                .ok()?;
+            Some(())
+        }
+        .await;
+
+        if ok.is_none() {
+            let _ = browser_download(&file_name, &bytes);
+        }
+    });
+}
+
+fn request_local_fonts_permission(ctx: &egui::Context) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        pick_and_load_font_files(ctx);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast as _;
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let query_val =
+            js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("queryLocalFonts"))
+                .unwrap_or(wasm_bindgen::JsValue::UNDEFINED);
+        let Ok(query_fn) = query_val.dyn_into::<js_sys::Function>() else {
+            // Browser does not support Local Font Access API; open file picker instead.
+            set_pending_status(
+                "Opening font file picker (Local Font Access API is Chromium-only)...",
+            );
+            pick_and_load_font_files(ctx);
+            return;
+        };
+
+        let Ok(promise_val) = query_fn.call0(&window) else {
+            pick_and_load_font_files(ctx);
+            return;
+        };
+        let Ok(promise) = promise_val.dyn_into::<js_sys::Promise>() else {
+            pick_and_load_font_files(ctx);
+            return;
+        };
+
+        set_pending_status("Requesting browser permission to load local system fonts...");
+        let ctx_clone = ctx.clone();
+        ctx_clone.request_repaint();
+
+        wasm_bindgen_futures::spawn_local(async move {
+            match wasm_bindgen_futures::JsFuture::from(promise).await {
+                Ok(list_val) => {
+                    let list = js_sys::Array::from(&list_val);
+                    let total = list.length();
+                    let mut loaded_faces = 0usize;
+                    let mut seen_families = std::collections::BTreeSet::new();
+
+                    for item in list.iter() {
+                        let family = js_sys::Reflect::get(
+                            &item,
+                            &wasm_bindgen::JsValue::from_str("family"),
+                        )
+                        .ok()
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_default();
+                        let style = js_sys::Reflect::get(
+                            &item,
+                            &wasm_bindgen::JsValue::from_str("style"),
+                        )
+                        .ok()
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_default();
+
+                        // Load Regular/Bold/Medium/Italic faces across up to 120 unique system families
+                        // so loading completes quickly without freezing the browser tab.
+                        let is_primary_style = style.eq_ignore_ascii_case("Regular")
+                            || style.eq_ignore_ascii_case("Bold")
+                            || style.eq_ignore_ascii_case("Medium")
+                            || style.eq_ignore_ascii_case("Roman")
+                            || !seen_families.contains(&family);
+                        if !is_primary_style || seen_families.len() >= 120 {
+                            continue;
+                        }
+
+                        let Some(blob_fn) = js_sys::Reflect::get(
+                            &item,
+                            &wasm_bindgen::JsValue::from_str("blob"),
+                        )
+                        .ok()
+                        .and_then(|v| v.dyn_into::<js_sys::Function>().ok()) else {
+                            continue;
+                        };
+                        let Some(blob_promise) = blob_fn
+                            .call0(&item)
+                            .ok()
+                            .and_then(|v| v.dyn_into::<js_sys::Promise>().ok())
+                        else {
+                            continue;
+                        };
+                        let Ok(blob_val) = wasm_bindgen_futures::JsFuture::from(blob_promise).await
+                        else {
+                            continue;
+                        };
+                        let Ok(blob) = blob_val.dyn_into::<web_sys::Blob>() else {
+                            continue;
+                        };
+                        let Ok(buf_val) =
+                            wasm_bindgen_futures::JsFuture::from(blob.array_buffer()).await
+                        else {
+                            continue;
+                        };
+                        let bytes = js_sys::Uint8Array::new(&buf_val).to_vec();
+                        if register_font_bytes(bytes) > 0 {
+                            seen_families.insert(family);
+                            loaded_faces += 1;
+                        }
+                    }
+
+                    set_pending_status(format!(
+                        "Loaded {loaded_faces} system font faces ({} families available out of {total} detected)",
+                        available_font_families().len()
+                    ));
+                    ctx_clone.request_repaint();
+                }
+                Err(_) => {
+                    set_pending_status(
+                        "System font permission was not granted — use 'Upload Font Files' to add .ttf/.otf fonts",
+                    );
+                    ctx_clone.request_repaint();
+                }
+            }
+        });
+    }
+}
+
+fn pick_and_load_font_files(ctx: &egui::Context) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Some(paths) = rfd::FileDialog::new()
+            .set_title("Load Font Files (.ttf, .otf, .ttc)")
+            .add_filter("Fonts", &["ttf", "otf", "ttc"])
+            .pick_files()
+        {
+            let mut faces = 0usize;
+            for path in paths {
+                if let Ok(bytes) = std::fs::read(&path) {
+                    faces += register_font_bytes(bytes);
+                }
+            }
+            set_pending_status(format!(
+                "Loaded {faces} font face(s) ({} total font families)",
+                available_font_families().len()
+            ));
+            ctx.request_repaint();
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        trigger_browser_file_input(ctx, ".ttf,.otf,.ttc", true);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn pick_and_load_studio_or_svg(ctx: &egui::Context) {
+    trigger_browser_file_input(ctx, ".motion,.json,.svg,.ttf,.otf,.ttc", true);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn trigger_browser_file_input(ctx: &egui::Context, accept: &str, multiple: bool) {
+    use wasm_bindgen::JsCast as _;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let Some(body) = document.body() else {
+        return;
+    };
+    let Ok(el) = document.create_element("input") else {
+        return;
+    };
+    let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>() else {
+        return;
+    };
+    input.set_type("file");
+    input.set_accept(accept);
+    input.set_multiple(multiple);
+    let _ = input.set_attribute("style", "display:none");
+    let _ = body.append_child(&input);
+
+    let input_clone = input.clone();
+    let ctx_clone = ctx.clone();
+    let onchange = Closure::once_into_js(move |_ev: web_sys::Event| {
+        if let Some(files) = input_clone.files() {
+            let count = files.length();
+            let mut file_list = Vec::new();
+            for i in 0..count {
+                if let Some(f) = files.item(i) {
+                    file_list.push(f);
+                }
+            }
+            let ctx_inner = ctx_clone.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                for f in file_list {
+                    let fname = f.name();
+                    if let Ok(buf) = wasm_bindgen_futures::JsFuture::from(f.array_buffer()).await {
+                        let bytes = js_sys::Uint8Array::new(&buf).to_vec();
+                        PENDING_FILES
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push((fname, bytes));
+                    }
+                }
+                ctx_inner.request_repaint();
+            });
+        }
+        input_clone.remove();
+    });
+    input.set_onchange(Some(onchange.unchecked_ref()));
+    input.click();
+}
+
+#[cfg(target_arch = "wasm32")]
+fn mime_for_name(name: &str) -> &'static str {
+    match name
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "wav" => "audio/wav",
+        "json" | "motion" | "ecproj" => "application/json",
+        _ => "application/octet-stream",
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 fn browser_download(name: &str, bytes: &[u8]) -> bool {
     use wasm_bindgen::JsCast as _;
+    use wasm_bindgen::closure::Closure;
     let Some(window) = web_sys::window() else {
         return false;
     };
@@ -774,7 +1879,7 @@ fn browser_download(name: &str, bytes: &[u8]) -> bool {
     };
     let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
     let bag = web_sys::BlobPropertyBag::new();
-    bag.set_type("application/octet-stream");
+    bag.set_type(mime_for_name(name));
     let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag) else {
         return false;
     };
@@ -789,10 +1894,18 @@ fn browser_download(name: &str, bytes: &[u8]) -> bool {
     };
     a.set_href(&url);
     a.set_download(name);
+    let _ = a.set_attribute("style", "display:none");
     let _ = body.append_child(&a);
     a.click();
     a.remove();
-    let _ = web_sys::Url::revoke_object_url(&url);
+    // Revoke the blob URL after 60s so large video downloads have plenty of time to start.
+    let revoke = Closure::once_into_js(move || {
+        let _ = web_sys::Url::revoke_object_url(&url);
+    });
+    let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+        revoke.unchecked_ref(),
+        60_000,
+    );
     true
 }
 
@@ -828,6 +1941,10 @@ impl eframe::App for MotionStudioApp {
             }
             ctx.request_repaint();
             return;
+        }
+
+        if let Some(msg) = take_pending_status() {
+            self.status_banner = msg;
         }
 
         self.handle_dropped_files(&ctx);
@@ -877,6 +1994,88 @@ mod tests {
         // Exporting the active frame to SVG produces valid SVG markup
         let svg = app.export_selected_frame_svg().unwrap();
         assert!(svg.contains("<svg"));
+    }
+
+    #[test]
+    fn studio_exporter_and_services_export_frame_and_render_queue_in_memory() {
+        let mut app = MotionStudioApp::new_with_showcase();
+        let cid = app.ec_app.session.active_comp_id().unwrap();
+
+        // 1. Test Save Frame As PNG through StudioEcServices into VIRTUAL_FS
+        app.ec_app
+            .session
+            .execute(
+                "comp.saveFrameAs",
+                json!({ "comp": cid.0, "path": "/test_frame.png", "scale": 0.25 }),
+            )
+            .unwrap();
+        let saved_png = app
+            .ec_app
+            .session
+            .services
+            .read_file("/test_frame.png")
+            .unwrap();
+        assert!(saved_png.starts_with(b"\x89PNG"));
+
+        // 2. Test Render Queue export through StudioExporter into VIRTUAL_FS
+        let added = app
+            .ec_app
+            .session
+            .execute("renderQueue.add", json!({ "comp": cid.0 }))
+            .unwrap();
+        let item_id = added["id"].as_u64().unwrap();
+        app.ec_app
+            .session
+            .execute(
+                "renderQueue.setRenderSettings",
+                json!({
+                    "item": item_id,
+                    "resolution": "quarter",
+                    "timeSpan": "custom",
+                    "start": 0.0,
+                    "duration": 0.1,
+                }),
+            )
+            .unwrap();
+        app.ec_app
+            .session
+            .execute(
+                "renderQueue.setOutputModule",
+                json!({
+                    "item": item_id,
+                    "format": "Gif",
+                    "output": "/test_anim.gif",
+                }),
+            )
+            .unwrap();
+        app.ec_app
+            .session
+            .execute("renderQueue.render", json!({ "wait": true }))
+            .unwrap();
+
+        let rendered_gif = app
+            .ec_app
+            .session
+            .services
+            .read_file("/test_anim.gif")
+            .unwrap();
+        assert!(rendered_gif.starts_with(b"GIF89a"));
+
+        // 3. Verify 18+ font families are bundled in both FigCraft and EffectCraft
+        let fig_fams = available_font_families();
+        let ec_fams = effectcraft_text::fonts::families();
+        assert!(
+            fig_fams.len() >= 18,
+            "expected >= 18 FigCraft font families, got {}: {:?}",
+            fig_fams.len(),
+            fig_fams
+        );
+        assert!(
+            ec_fams.len() >= 18,
+            "expected >= 18 EffectCraft font families, got {}: {:?}",
+            ec_fams.len(),
+            ec_fams
+        );
     }
 
     #[test]

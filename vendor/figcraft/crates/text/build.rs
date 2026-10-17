@@ -36,6 +36,21 @@ fn main() {
             ("Inter", "Italic", "Inter-Italic.ttf"),
             ("JetBrains Mono", "Regular", "JetBrainsMono-Regular.ttf"),
             ("Noto Serif", "Regular", "NotoSerif-Regular.ttf"),
+            ("Bebas Neue", "Regular", "BebasNeue-Regular.ttf"),
+            ("Space Grotesk", "Regular", "SpaceGrotesk-Variable.ttf"),
+            ("Outfit", "Regular", "Outfit-Variable.ttf"),
+            ("Plus Jakarta Sans", "Regular", "PlusJakartaSans-Variable.ttf"),
+            ("Syne", "Regular", "Syne-Variable.ttf"),
+            ("Playfair Display", "Regular", "PlayfairDisplay-Variable.ttf"),
+            ("Cinzel", "Regular", "Cinzel-Variable.ttf"),
+            ("Oswald", "Regular", "Oswald-Variable.ttf"),
+            ("Montserrat", "Regular", "Montserrat-Variable.ttf"),
+            ("Archivo Black", "Regular", "ArchivoBlack-Regular.ttf"),
+            ("Righteous", "Regular", "Righteous-Regular.ttf"),
+            ("Pacifico", "Regular", "Pacifico-Regular.ttf"),
+            ("Permanent Marker", "Regular", "PermanentMarker-Regular.ttf"),
+            ("Anton", "Regular", "Anton-Regular.ttf"),
+            ("DM Serif Display", "Regular", "DMSerifDisplay-Regular.ttf"),
         ];
         for (family, style, filename) in bundled {
             if let Ok(path) = fallback_dir.join(filename).canonicalize() {

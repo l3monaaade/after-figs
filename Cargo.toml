@@ -41,6 +41,7 @@ effectcraft-gpu = { path = "vendor/effectcraft/crates/gpu" }
 effectcraft-lottie = { path = "vendor/effectcraft/crates/lottie" }
 effectcraft-svg = { path = "vendor/effectcraft/crates/svg" }
 effectcraft-engine = { path = "vendor/effectcraft/crates/engine" }
+effectcraft-export = { path = "vendor/effectcraft/crates/export" }
 effectcraft-host = { path = "vendor/effectcraft/crates/host" }
 effectcraft-ui-egui = { path = "vendor/effectcraft/crates/ui-egui" }
 

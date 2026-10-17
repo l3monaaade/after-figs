@@ -3487,9 +3487,11 @@ name = "motion-ui"
 version = "0.1.0"
 dependencies = [
  "effectcraft-engine",
+ "effectcraft-export",
  "effectcraft-host",
  "effectcraft-project",
  "effectcraft-render",
+ "effectcraft-text",
  "effectcraft-time",
  "effectcraft-ui-egui",
  "eframe",
@@ -3499,6 +3501,7 @@ dependencies = [
  "figcraft-engine",
  "figcraft-geom",
  "figcraft-layout",
+ "figcraft-text",
  "figcraft-ui-egui",
  "js-sys",
  "log",
@@ -3507,6 +3510,7 @@ dependencies = [
  "serde",
  "serde_json",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 
