@@ -77,10 +77,18 @@
         console.error("After Figs boot error:", err);
         const el = document.getElementById("motion_loading");
         if (el) {
-          el.innerHTML = `<div style="text-align:center;max-width:520px;padding:24px">
-            <div class="title" style="color:#f87171;margin-bottom:8px">Failed to start After Figs</div>
-            <div class="subtitle">${String(err)}</div>
-          </div>`;
+          const wrap = document.createElement("div");
+          wrap.style.cssText = "text-align:center;max-width:520px;padding:24px";
+          const title = document.createElement("div");
+          title.className = "title";
+          title.style.color = "#f87171";
+          title.style.marginBottom = "8px";
+          title.textContent = "Failed to start After Figs";
+          const detail = document.createElement("div");
+          detail.className = "subtitle";
+          detail.textContent = String(err);
+          wrap.append(title, detail);
+          el.replaceChildren(wrap);
         }
       }
     }

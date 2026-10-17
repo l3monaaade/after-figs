@@ -1,2 +1,9 @@
 /target/
 .DS_Store
+
+# Web bundle published by GitHub Actions (see .github/workflows/pages.yml).
+# Do not commit these. The wasm is ~70MB and an earlier build embedded local
+# `/Users/d3dfly-laptop/...` paths. Ignoring them stops new copies from entering
+# history; the blobs already on main are left in place (history was not rewritten).
+/docs/motion_web_bg.wasm
+/docs/motion_web.js

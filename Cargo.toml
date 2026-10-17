@@ -26,7 +26,9 @@ figcraft-format = { path = "vendor/figcraft/crates/format" }
 figcraft-engine = { path = "vendor/figcraft/crates/engine" }
 figcraft-ui-egui = { path = "vendor/figcraft/crates/ui-egui" }
 
-# EffectCraft crates
+# EffectCraft crates. Source is the vendor/effectcraft git submodule
+# (https://github.com/storytold/effectcraft). A fresh clone needs
+# `git submodule update --init` before these paths exist.
 effectcraft-time = { path = "vendor/effectcraft/crates/time" }
 effectcraft-geom = { path = "vendor/effectcraft/crates/geom" }
 effectcraft-color = { path = "vendor/effectcraft/crates/color" }
@@ -60,4 +62,11 @@ env_logger = "0.11"
 opt-level = "s"
 debug = false
 strip = true
+
+# EffectCraft's workspace patches `hayro-syntax` to the copy inside craft-libs.
+# Cargo applies `[patch]` only in the workspace that declares it, so path
+# dependencies on vendor/effectcraft do not inherit that patch. Without this,
+# crates.io hayro-syntax 0.7.2 is selected and `craft-pdf` fails to compile.
+[patch.crates-io]
+hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d", version = "=0.7.2" }
 

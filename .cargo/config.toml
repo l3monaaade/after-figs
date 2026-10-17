@@ -1,0 +1,27 @@
+# Host paths must not land in published binaries. The previously committed
+# `docs/motion_web_bg.wasm` contained ~1,700 `/Users/d3dfly-laptop/...` paths
+# (Cargo git checkouts of craft-libs and filmcraft, plus EffectCraft sources).
+#
+# `profile.trim-paths` is still unstable on this repo's Rust 1.95 toolchain, so
+# the stable mechanism is rustc's `--remap-path-prefix`. Cargo consults extra
+# rustc flags in this order and uses only the first that is set:
+#   1. CARGO_ENCODED_RUSTFLAGS
+#   2. RUSTFLAGS
+#   3. target.*.rustflags
+#   4. build.rustflags (this file)
+#
+# `apps/motion-web-server` sets CARGO_ENCODED_RUSTFLAGS for the wasm build and
+# includes the prefix below plus the workspace root, `$HOME`, and Cargo home.
+# A direct `cargo build` on the machine that produced the leak still hits the
+# flag here, as long as those environment variables are unset.
+#
+# See README.md.
+
+[build]
+rustflags = ["--remap-path-prefix=/Users/d3dfly-laptop=/user"]
+
+[env]
+# Fonts for vendored FigCraft (`vendor/figcraft/crates/text/build.rs`).
+# Relative to this file's directory (the workspace root). If the submodule is
+# not checked out, the build warns and embeds no fonts.
+EFFECTCRAFT_DIR = { value = "vendor/effectcraft", relative = true }

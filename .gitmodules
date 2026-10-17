@@ -1,0 +1,3 @@
+[submodule "vendor/effectcraft"]
+	path = vendor/effectcraft
+	url = https://github.com/storytold/effectcraft.git

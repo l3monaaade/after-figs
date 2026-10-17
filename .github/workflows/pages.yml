@@ -1,0 +1,65 @@
+# Builds the wasm bundle and publishes it to GitHub Pages.
+#
+# The bundle is not stored in git (see .gitignore). Pages must be set to
+# "GitHub Actions" in the repo settings (Settings → Pages → Source).
+# This job needs the vendor/effectcraft submodule and EffectCraft's own git
+# dependencies (storytold/filmcraft, storytold/craft-libs). It does not rewrite
+# git history; older commits still contain docs/motion_web_bg.wasm.
+
+name: GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build web bundle with host paths remapped
+        env:
+          # Used when CARGO_ENCODED_RUSTFLAGS is unset. motion-web-server sets
+          # CARGO_ENCODED_RUSTFLAGS for the wasm rustc and appends these flags
+          # plus workspace, home, and Cargo-home prefixes.
+          RUSTFLAGS: --remap-path-prefix=/Users/d3dfly-laptop=/user
+        run: cargo run -p motion-web-server --locked --release -- --build-only
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

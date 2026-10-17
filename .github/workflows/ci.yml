@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    name: motion-web-server tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Refuse committed wasm bundles
+        run: |
+          if git ls-files 'docs/*.wasm' 'docs/motion_web.js' | grep -q .; then
+            echo "docs/motion_web_bg.wasm and docs/motion_web.js are build artifacts."
+            echo "GitHub Actions deploys them to Pages; do not commit them."
+            git ls-files 'docs/*.wasm' 'docs/motion_web.js'
+            exit 1
+          fi
+
+      - name: Test static path handling
+        run: cargo test -p motion-web-server --locked
