@@ -64,7 +64,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
             Err(e) => {
                 loading.set_inner_html(&format!(
                     "<div style='text-align:center;max-width:480px;padding:24px'>\
-                     <h3 style='color:#f87171;margin-bottom:8px'>MotionCraft Studio failed to start</h3>\
+                     <h3 style='color:#f87171;margin-bottom:8px'>After Figs failed to start</h3>\
                      <p style='color:#94a3b8;font-size:13px'>{e:?}</p>\
                      <p style='color:#64748b;font-size:12px'>Ensure WebGPU or WebGL2 is enabled in your browser.</p>\
                      </div>"

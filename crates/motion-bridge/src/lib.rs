@@ -1944,7 +1944,7 @@ fn set_prop_color(group: &mut PropGroup, match_id: &str, val: [f64; 4]) {
 /// - A `BooleanOp::Subtract` emblem badge combining a Star and Ellipse
 /// - Keyframed entrance animations and `Trim Paths` stroke draw-on in EffectCraft
 pub fn create_showcase_studio() -> Result<MotionStudioFile, BridgeError> {
-    let mut doc = Document::new("MotionCraft Studio — Vector & Motion Showcase");
+    let mut doc = Document::new("After Figs — Vector & Motion Showcase");
     let page_id = doc.first_page().unwrap_or_else(|| doc.add_page("Page 1"));
     if let Some(page) = doc.node_mut(page_id) {
         page.kind = NodeKind::Page {
@@ -2278,7 +2278,7 @@ pub fn create_showcase_studio() -> Result<MotionStudioFile, BridgeError> {
 
     // 7. Headline Text Node
     let mut title_text = TextData::default();
-    title_text.characters = "FIGCRAFT × EFFECTCRAFT".to_string();
+    title_text.characters = "AFTER FIGS".to_string();
     title_text.style.font_size = 44.0;
     title_text.style.font_style = "Bold".to_string();
     let title_id = doc.create(
@@ -2302,7 +2302,7 @@ pub fn create_showcase_studio() -> Result<MotionStudioFile, BridgeError> {
     add_showcase_animations(&mut project, report.comp_id);
 
     Ok(MotionStudioFile::new(
-        "MotionCraft Studio Showcase",
+        "After Figs Showcase",
         doc,
         project,
         options,

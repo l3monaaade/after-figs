@@ -233,7 +233,7 @@ fn write_ppm(path: PathBuf, image: &effectcraft_render::Image) -> Result<(), Str
 
 fn launch_gui(initial: Option<(MotionStudioFile, PathBuf)>) -> Result<(), String> {
     let viewport = egui::ViewportBuilder::default()
-        .with_title("MotionCraft Studio — FigCraft × EffectCraft")
+        .with_title("After Figs — FigCraft × EffectCraft")
         .with_inner_size([1680.0, 1020.0])
         .with_min_inner_size([1024.0, 680.0]);
 
@@ -243,7 +243,7 @@ fn launch_gui(initial: Option<(MotionStudioFile, PathBuf)>) -> Result<(), String
     };
 
     eframe::run_native(
-        "MotionCraft Studio — FigCraft × EffectCraft",
+        "After Figs — FigCraft × EffectCraft",
         native_options,
         Box::new(move |_cc| {
             let app = match initial {

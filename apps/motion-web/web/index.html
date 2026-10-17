@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-  <title>MotionCraft Studio — FigCraft Design + EffectCraft Animation</title>
+  <title>After Figs — FigCraft Design + EffectCraft Animation</title>
   <style>
     html, body {
       margin: 0;
@@ -64,7 +64,7 @@
   <canvas id="motion_canvas"></canvas>
   <div id="motion_loading">
     <div class="spinner"></div>
-    <div class="title">MotionCraft Studio</div>
+    <div class="title">After Figs</div>
     <div class="subtitle">Loading FigCraft Vector Engine &amp; EffectCraft Compositor&hellip;</div>
   </div>
   <script type="module">
@@ -74,11 +74,11 @@
         await init("./motion_web_bg.wasm");
         await start("motion_canvas");
       } catch (err) {
-        console.error("MotionCraft Studio boot error:", err);
+        console.error("After Figs boot error:", err);
         const el = document.getElementById("motion_loading");
         if (el) {
           el.innerHTML = `<div style="text-align:center;max-width:520px;padding:24px">
-            <div class="title" style="color:#f87171;margin-bottom:8px">Failed to start MotionCraft Studio</div>
+            <div class="title" style="color:#f87171;margin-bottom:8px">Failed to start After Figs</div>
             <div class="subtitle">${String(err)}</div>
           </div>`;
         }

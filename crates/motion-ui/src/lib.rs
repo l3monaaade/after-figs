@@ -74,7 +74,7 @@ impl MotionStudioApp {
     pub fn new_with_showcase() -> Self {
         let studio = create_showcase_studio().unwrap_or_else(|_| {
             MotionStudioFile::new(
-                "MotionCraft Studio",
+                "After Figs",
                 Document::new("Untitled"),
                 effectcraft_project::Project::default(),
                 BakeOptions::default(),
@@ -410,6 +410,14 @@ impl MotionStudioApp {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
 
+                    ui.label(
+                        egui::RichText::new("◆ After Figs")
+                            .strong()
+                            .size(12.0)
+                            .color(egui::Color32::WHITE),
+                    );
+                    ui.separator();
+
                     // Mode switcher pill at bottom-left
                     let modes = [
                         (WorkspaceMode::Design, "✏ Design (FigCraft)", accent_fig),
@@ -742,11 +750,11 @@ impl MotionStudioApp {
         }
 
         ui.separator();
-        if ui.button("✨ Reset Showcase Demo").clicked() {
+        if ui.button("✨ Reset After Figs Demo").clicked() {
             ui.close();
             if let Ok(studio) = create_showcase_studio() {
                 self.load_studio(studio);
-                self.status_banner = "Reset to MotionCraft Showcase Studio".to_string();
+                self.status_banner = "Reset to After Figs Showcase".to_string();
             }
         }
     }
