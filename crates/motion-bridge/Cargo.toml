@@ -1,0 +1,34 @@
+[package]
+name = "motion-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Precision design-to-animation compiler bridging FigCraft (frames, grids, auto-layout, vector networks, brushes, booleans, SVG) and EffectCraft (compositions, shape layers, keyframes, expressions, effects)"
+
+[dependencies]
+figcraft-geom = { workspace = true }
+figcraft-color = { workspace = true }
+figcraft-doc = { workspace = true }
+figcraft-layout = { workspace = true }
+figcraft-text = { workspace = true }
+figcraft-pathops = { workspace = true }
+figcraft-render = { workspace = true }
+figcraft-svg = { workspace = true }
+figcraft-format = { workspace = true }
+figcraft-engine = { workspace = true }
+
+effectcraft-time = { workspace = true }
+effectcraft-geom = { workspace = true }
+effectcraft-color = { workspace = true }
+effectcraft-path = { workspace = true }
+effectcraft-keyframe = { workspace = true }
+effectcraft-project = { workspace = true }
+effectcraft-effects = { workspace = true }
+effectcraft-svg = { workspace = true }
+effectcraft-engine = { workspace = true }
+
+kurbo = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }

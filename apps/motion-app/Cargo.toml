@@ -1,0 +1,24 @@
+[package]
+name = "motion-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "MotionCraft Studio desktop application and CLI combining FigCraft vector design and EffectCraft animation"
+
+[[bin]]
+name = "motion-app"
+path = "src/main.rs"
+
+[dependencies]
+motion-bridge.workspace = true
+motion-ui.workspace = true
+figcraft-doc.workspace = true
+effectcraft-time.workspace = true
+effectcraft-project.workspace = true
+effectcraft-render.workspace = true
+egui.workspace = true
+eframe.workspace = true
+env_logger.workspace = true
+log.workspace = true
+serde_json.workspace = true
