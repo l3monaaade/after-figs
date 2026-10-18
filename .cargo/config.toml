@@ -22,6 +22,6 @@ rustflags = ["--remap-path-prefix=/Users/d3dfly-laptop=/user"]
 
 [env]
 # Fonts for vendored FigCraft (`vendor/figcraft/crates/text/build.rs`).
-# Relative to this file's directory (the workspace root). If the submodule is
-# not checked out, the build warns and embeds no fonts.
+# Relative to this file's directory (the workspace root). If assets/fonts is
+# missing, the build warns and embeds no fonts.
 EFFECTCRAFT_DIR = { value = "vendor/effectcraft", relative = true }

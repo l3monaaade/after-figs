@@ -1,22 +1,18 @@
 # After Figs
 
-FigCraft design and EffectCraft animation in one workspace. FigCraft is vendored under `vendor/figcraft`. EffectCraft is the [`storytold/effectcraft`](https://github.com/storytold/effectcraft) submodule at `vendor/effectcraft` (public, Apache-2.0 / MIT). There is no EffectCraft repo under this GitHub account.
-
-## Checkout
+FigCraft design and EffectCraft animation in one workspace. FigCraft is vendored under `vendor/figcraft`. EffectCraft is your own source, committed as ordinary files under `vendor/effectcraft`. That directory is a placeholder until you add it. Steps are in [`vendor/effectcraft/README.md`](vendor/effectcraft/README.md).
 
 ```sh
-git clone --recurse-submodules https://github.com/l3monaaade/after-figs.git
-# or, after a plain clone:
-git submodule update --init
+git clone https://github.com/l3monaaade/after-figs.git
 ```
 
-The submodule is pinned to commit `8f02f52a44a4b1ea807d8824b92301b96f896a06` (`main` as of 2026-10-16). `cargo check --workspace` needs `vendor/effectcraft/crates/*/Cargo.toml`. Without the submodule those path dependencies are missing and the workspace does not resolve.
-
-EffectCraft patches crates.io `hayro-syntax` to the copy in `storytold/craft-libs`. That patch does not apply to this workspace automatically, so the root `Cargo.toml` repeats it. Dropping the patch makes `craft-pdf` fail to compile.
-
-A private EffectCraft tree can replace the submodule (`git submodule set-url vendor/effectcraft <url>` then update), or you can point fonts at it with `EFFECTCRAFT_DIR` / `EFFECTCRAFT_FONTS_DIR` without using it as the crate source. Crate source still has to be the submodule (or another checkout at `vendor/effectcraft`).
-
 Rust 1.95 or newer (`rust-version` in `Cargo.toml`, edition 2024).
+
+With the placeholder in place:
+
+- `cargo test -p motion-web-server` runs.
+- FigCraft's font build warns and embeds no EffectCraft fonts.
+- `cargo check --workspace` stops on the placeholder crates. That is expected until your tree replaces them.
 
 ## Fonts
 
@@ -26,15 +22,13 @@ Rust 1.95 or newer (`rust-version` in `Cargo.toml`, edition 2024).
 2. Otherwise `EFFECTCRAFT_FONTS_DIR`, or `$EFFECTCRAFT_DIR/assets/fonts`, or `vendor/effectcraft/assets/fonts`.
 3. If none of those exist, `CRAFT_FONTS` is empty, the build warns, and the app uses system fonts.
 
-`.cargo/config.toml` sets `EFFECTCRAFT_DIR` to `vendor/effectcraft`. A missing directory does not fail the build. `include_bytes!` paths are written relative to the build script output so the generated source does not contain a host path.
-
-The public EffectCraft tree ships Inter, JetBrains Mono, and Noto Serif. The other families in the fallback list are skipped when the files are absent.
+`.cargo/config.toml` sets `EFFECTCRAFT_DIR` to `vendor/effectcraft`. A missing font directory does not fail the build. `include_bytes!` paths are written relative to the build script output so the generated source does not contain a host path. Families in the fallback list are skipped when the files are absent.
 
 ## Web bundle and GitHub Pages
 
 Do not commit `docs/motion_web_bg.wasm` or `docs/motion_web.js`. They are gitignored. [`.github/workflows/pages.yml`](.github/workflows/pages.yml) builds the bundle and deploys `target/web/dist` to GitHub Pages. [`.github/workflows/ci.yml`](.github/workflows/ci.yml) fails if those files are tracked again.
 
-**Owner step:** in the repo settings, set Pages → Source to **GitHub Actions**. Until that is on, and until the workflow goes green, the site is not updated by this change. The workflow checks out the submodule and then builds EffectCraft plus its git dependencies (`storytold/filmcraft`, `storytold/craft-libs`). `cargo check --workspace` passes on the host with that pin. This change does not rebuild or commit a wasm binary; Pages publishes the next one.
+**Owner step:** in the repo settings, set Pages → Source to **GitHub Actions**. While `vendor/effectcraft/PLACEHOLDER` exists, the workflow skips the wasm build instead of failing. After you commit your EffectCraft tree and delete that marker, the workflow builds `target/web/dist` and deploys it. This change does not commit a wasm binary.
 
 Local preview, once EffectCraft resolves:
 
@@ -65,7 +59,7 @@ That serves `http://127.0.0.1:8080/` from `target/web/dist` (not from `docs/`).
 
 `strip = true` removes symbols. It does not remove path strings. The remap flags do.
 
-The wasm that used to live at `docs/motion_web_bg.wasm` still contains those paths in git history. It was removed from the tree going forward and was not rebuilt here, because a wasm link needs EffectCraft and the filmcraft / craft-libs crates it pulls in. Crate names such as `filmcraft` can still appear as Rust package names after remapping; the flags remove directories, not dependency names. Those two crates are public (`storytold/filmcraft`, `storytold/craft-libs`).
+The wasm that used to live at `docs/motion_web_bg.wasm` still contains those paths in git history. It was removed from the tree going forward. A new bundle is produced by the Pages workflow after your EffectCraft source is in `vendor/effectcraft`. Remap flags strip directories. Crate names that your tree depends on can still appear in the binary as package names.
 
 ## Dev server paths
 

@@ -77,7 +77,7 @@ fn main() {
                 }
             }
             None => println!(
-                "cargo::warning=no CRAFT_FONTS_DIR and no EffectCraft fonts directory; CRAFT_FONTS is empty and the app uses system fonts. Set CRAFT_FONTS_DIR or EFFECTCRAFT_DIR, or check out the vendor/effectcraft submodule (see README.md)."
+                "cargo::warning=no CRAFT_FONTS_DIR and no EffectCraft fonts directory; CRAFT_FONTS is empty and the app uses system fonts. Set CRAFT_FONTS_DIR or EFFECTCRAFT_DIR, or add assets/fonts under vendor/effectcraft (see README.md)."
             ),
         }
     }
@@ -91,7 +91,7 @@ fn main() {
 /// Directories tried when `CRAFT_FONTS_DIR` did not embed anything.
 ///
 /// The relative candidate matches both a sibling EffectCraft checkout
-/// (`figcraft/crates/text` → `../../../effectcraft`) and this repo's submodule
+/// (`figcraft/crates/text` → `../../../effectcraft`) and this repo
 /// (`vendor/figcraft/crates/text` → `vendor/effectcraft`). A missing directory
 /// is skipped; fonts are optional.
 fn font_fallback_dir() -> Option<PathBuf> {

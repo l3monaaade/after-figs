@@ -1,0 +1,8 @@
+This directory is a placeholder, not EffectCraft.
+
+Replace the whole directory with your own EffectCraft source, then commit
+those files in this repository. There is no submodule and no remote.
+
+See README.md in this directory for the exact steps.
+Delete this file as part of that replacement. GitHub Pages skips the wasm
+build while this file exists.

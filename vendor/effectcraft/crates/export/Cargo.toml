@@ -1,0 +1,9 @@
+[package]
+name = "effectcraft-export"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Placeholder. Replace vendor/effectcraft with your EffectCraft source. See ../README.md."
+
+[lib]
+path = "src/lib.rs"
