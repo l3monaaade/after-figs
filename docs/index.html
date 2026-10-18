@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>After Figs — FigCraft Design + EffectCraft Animation</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #14161b;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    #motion_canvas {
+      position: absolute;
+      inset: 0;
+      width: 100% !important;
+      height: 100% !important;
+      display: block;
+      outline: none;
+    }
+    #motion_loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(circle at center, #1c2029 0%, #111318 100%);
+      z-index: 10;
+      gap: 14px;
+    }
+    .spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid rgba(255, 255, 255, 0.12);
+      border-top-color: #0d99ff;
+      border-right-color: #9b6bff;
+      border-radius: 50%;
+      animation: spin 0.85s linear infinite;
+    }
+    .title {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      color: #f8fafc;
+    }
+    .subtitle {
+      font-size: 12.5px;
+      color: #94a3b8;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="motion_canvas"></canvas>
+  <div id="motion_loading">
+    <div class="spinner"></div>
+    <div class="title">After Figs</div>
+    <div class="subtitle">Loading FigCraft Vector Engine &amp; EffectCraft Compositor&hellip;</div>
+  </div>
+  <script type="module">
+    import init, { start } from "./motion_web.js";
+    async function boot() {
+      try {
+        await init("./motion_web_bg.wasm");
+        await start("motion_canvas");
+      } catch (err) {
+        console.error("After Figs boot error:", err);
+        const el = document.getElementById("motion_loading");
+        if (el) {
+          const wrap = document.createElement("div");
+          wrap.style.cssText = "text-align:center;max-width:520px;padding:24px";
+          const title = document.createElement("div");
+          title.className = "title";
+          title.style.cssText = "color:#f87171;margin-bottom:8px";
+          title.textContent = "Failed to start After Figs";
+          const sub = document.createElement("div");
+          sub.className = "subtitle";
+          sub.textContent = String(err);
+          wrap.append(title, sub);
+          el.replaceChildren(wrap);
+        }
+      }
+    }
+    boot();
+  </script>
+</body>
+</html>

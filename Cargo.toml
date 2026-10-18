@@ -1,0 +1,66 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*"]
+exclude = ["vendor/figcraft", "vendor/effectcraft"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+
+[workspace.dependencies]
+motion-bridge = { path = "crates/motion-bridge" }
+motion-ui = { path = "crates/motion-ui" }
+
+# FigCraft crates
+figcraft-geom = { path = "vendor/figcraft/crates/geom" }
+figcraft-color = { path = "vendor/figcraft/crates/color" }
+figcraft-doc = { path = "vendor/figcraft/crates/doc" }
+figcraft-layout = { path = "vendor/figcraft/crates/layout" }
+figcraft-text = { path = "vendor/figcraft/crates/text" }
+figcraft-pathops = { path = "vendor/figcraft/crates/pathops" }
+figcraft-render = { path = "vendor/figcraft/crates/render" }
+figcraft-svg = { path = "vendor/figcraft/crates/svg" }
+figcraft-format = { path = "vendor/figcraft/crates/format" }
+figcraft-engine = { path = "vendor/figcraft/crates/engine" }
+figcraft-ui-egui = { path = "vendor/figcraft/crates/ui-egui" }
+
+# EffectCraft crates
+effectcraft-time = { path = "vendor/effectcraft/crates/time" }
+effectcraft-geom = { path = "vendor/effectcraft/crates/geom" }
+effectcraft-color = { path = "vendor/effectcraft/crates/color" }
+effectcraft-raster = { path = "vendor/effectcraft/crates/raster" }
+effectcraft-path = { path = "vendor/effectcraft/crates/path" }
+effectcraft-keyframe = { path = "vendor/effectcraft/crates/keyframe" }
+effectcraft-project = { path = "vendor/effectcraft/crates/project" }
+effectcraft-text = { path = "vendor/effectcraft/crates/text" }
+effectcraft-effects = { path = "vendor/effectcraft/crates/effects" }
+effectcraft-render = { path = "vendor/effectcraft/crates/render" }
+effectcraft-gpu = { path = "vendor/effectcraft/crates/gpu" }
+effectcraft-lottie = { path = "vendor/effectcraft/crates/lottie" }
+effectcraft-svg = { path = "vendor/effectcraft/crates/svg" }
+effectcraft-engine = { path = "vendor/effectcraft/crates/engine" }
+effectcraft-export = { path = "vendor/effectcraft/crates/export" }
+effectcraft-host = { path = "vendor/effectcraft/crates/host" }
+effectcraft-ui-egui = { path = "vendor/effectcraft/crates/ui-egui" }
+
+# Shared foundation & UI
+kurbo = { version = "0.13", features = ["serde"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+thiserror = "2"
+log = "0.4"
+egui = "0.36"
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }
+rfd = "0.17"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+debug = false
+strip = true
+panic = "abort"
+
